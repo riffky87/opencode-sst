@@ -309,7 +309,7 @@ export namespace MCP {
     if (mcp.type === "local") {
       const [cmd, ...args] = mcp.command
       const transport = new StdioClientTransport({
-        stderr: "ignore",
+        stderr: "pipe",
         command: cmd,
         args,
         env: {
@@ -317,6 +317,14 @@ export namespace MCP {
           ...(cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}),
           ...mcp.environment,
         },
+      })
+
+      // Log stderr output from MCP server
+      transport.stderr?.on("data", (data: Buffer) => {
+        const message = data.toString().trim()
+        if (message) {
+          log.info(`[${key}] ${message}`)
+        }
       })
 
       try {
