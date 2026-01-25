@@ -13,6 +13,7 @@ import PROMPT_ANTHROPIC_WITHOUT_TODO from "./prompt/qwen.txt"
 import PROMPT_POLARIS from "./prompt/polaris.txt"
 import PROMPT_BEAST from "./prompt/beast.txt"
 import PROMPT_GEMINI from "./prompt/gemini.txt"
+import PROMPT_GROK from "./prompt/grok.txt"
 import PROMPT_ANTHROPIC_SPOOF from "./prompt/anthropic_spoof.txt"
 
 import PROMPT_CODEX from "./prompt/codex.txt"
@@ -31,6 +32,7 @@ export namespace SystemPrompt {
     if (model.api.id.includes("gemini-")) return [PROMPT_GEMINI]
     if (model.api.id.includes("claude")) return [PROMPT_ANTHROPIC]
     if (model.api.id.includes("polaris-alpha")) return [PROMPT_POLARIS]
+    if (model.api.id.includes("grok")) return [PROMPT_GROK]
     return [PROMPT_ANTHROPIC_WITHOUT_TODO]
   }
 
