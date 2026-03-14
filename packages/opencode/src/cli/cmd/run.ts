@@ -333,7 +333,8 @@ export const RunCommand = cmd({
 
       const sessionID = await (async () => {
         if (args.continue) {
-          const sessions = await Session.list()
+          const sessions: Session.Info[] = []
+          for await (const s of Session.list()) sessions.push(s)
           return sessions.find((s) => !s.parentID)?.id
         }
         if (args.session) return args.session
