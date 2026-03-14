@@ -11,6 +11,9 @@ import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2"
 import { Server } from "../../server/server"
 import { Provider } from "../../provider/provider"
 import { Agent } from "../../agent/agent"
+import { Log } from "../../util/log"
+
+const runLog = Log.create({ service: "run-cmd" })
 
 const TOOL: Record<string, [string, string]> = {
   todowrite: ["Todo", UI.Style.TEXT_WARNING_BOLD],
@@ -313,7 +316,9 @@ export const RunCommand = cmd({
 
     await bootstrap(process.cwd(), async () => {
       const server = Server.listen({ port: args.port ?? 0, hostname: "127.0.0.1" })
-      const sdk = createOpencodeClient({ baseUrl: `http://${server.hostname}:${server.port}` })
+      const baseUrl = `http://${server.hostname}:${server.port}`
+      runLog.info("server started", { baseUrl })
+      const sdk = createOpencodeClient({ baseUrl })
 
       if (args.command) {
         const exists = await Command.get(args.command)
@@ -338,8 +343,19 @@ export const RunCommand = cmd({
               : args.title
             : undefined
 
-        const result = await sdk.session.create(title ? { title } : {})
-        return result.data?.id
+        runLog.info("creating session", { title })
+        try {
+          const result = await sdk.session.create(title ? { title } : {})
+          runLog.info("session.create result", { data: result.data, error: result.error })
+          if (result.error) {
+            UI.error(`Session creation failed: ${JSON.stringify(result.error)}`)
+          }
+          return result.data?.id
+        } catch (e) {
+          runLog.error("session.create threw", { error: String(e), stack: (e as Error)?.stack })
+          UI.error(`Session creation exception: ${e}`)
+          return undefined
+        }
       })()
 
       if (!sessionID) {
