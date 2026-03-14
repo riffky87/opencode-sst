@@ -12,6 +12,9 @@ import { Server } from "../../server/server"
 import { Provider } from "../../provider/provider"
 import { Agent } from "../../agent/agent"
 import { Session } from "../../session"
+import { SessionPrompt } from "../../session/prompt"
+import { Bus } from "../../bus"
+import { Permission } from "../../permission"
 import { Log } from "../../util/log"
 
 const runLog = Log.create({ service: "run-cmd" })
@@ -316,15 +319,13 @@ export const RunCommand = cmd({
     }
 
     await bootstrap(process.cwd(), async () => {
-      const server = Server.listen({ port: args.port ?? 0, hostname: "127.0.0.1" })
-      const baseUrl = `http://${server.hostname}:${server.port}`
-      runLog.info("server started", { baseUrl })
-      const sdk = createOpencodeClient({ baseUrl })
+      // Bypass the HTTP server entirely for standalone binary compatibility.
+      // The Bun standalone binary's Bun.serve() has ECONNRESET issues,
+      // so we call Session/Bus/Prompt functions directly instead of via SDK.
 
       if (args.command) {
         const exists = await Command.get(args.command)
         if (!exists) {
-          server.stop()
           UI.error(`Command "${args.command}" not found`)
           process.exit(1)
         }
@@ -332,8 +333,8 @@ export const RunCommand = cmd({
 
       const sessionID = await (async () => {
         if (args.continue) {
-          const result = await sdk.session.list()
-          return result.data?.find((s) => !s.parentID)?.id
+          const sessions = await Session.list()
+          return sessions.find((s) => !s.parentID)?.id
         }
         if (args.session) return args.session
 
@@ -357,26 +358,160 @@ export const RunCommand = cmd({
       })()
 
       if (!sessionID) {
-        server.stop()
         UI.error("Session not found")
         process.exit(1)
       }
 
-      const cfgResult = await sdk.config.get()
-      if (cfgResult.data && (cfgResult.data.share === "auto" || Flag.OPENCODE_AUTO_SHARE || args.share)) {
-        const shareResult = await sdk.session.share({ sessionID }).catch((error) => {
-          if (error instanceof Error && error.message.includes("disabled")) {
-            UI.println(UI.Style.TEXT_DANGER_BOLD + "!  " + error.message)
-          }
-          return { error }
-        })
-        if (!shareResult.error && "data" in shareResult && shareResult.data?.share?.url) {
-          UI.println(UI.Style.TEXT_INFO_BOLD + "~  " + shareResult.data.share.url)
-        }
+      // Event processing via direct Bus subscription (no HTTP)
+      const printEvent = (color: string, type: string, title: string) => {
+        UI.println(
+          color + `|`,
+          UI.Style.TEXT_NORMAL + UI.Style.TEXT_DIM + ` ${type.padEnd(7, " ")}`,
+          "",
+          UI.Style.TEXT_NORMAL + title,
+        )
       }
 
-      await execute(sdk, sessionID)
-      server.stop()
+      const outputJsonEvent = (type: string, data: any) => {
+        if (args.format === "json") {
+          process.stdout.write(JSON.stringify({ type, timestamp: Date.now(), sessionID, ...data }) + EOL)
+          return true
+        }
+        return false
+      }
+
+      let errorMsg: string | undefined
+      let resolveIdle: (() => void) | undefined
+      const idlePromise = new Promise<void>((resolve) => { resolveIdle = resolve })
+
+      const unsub = Bus.subscribeAll((event: any) => {
+        if (event.type === "message.part.updated") {
+          const part = event.properties.part
+          if (part.sessionID !== sessionID) return
+
+          if (part.type === "tool" && part.state.status === "completed") {
+            if (outputJsonEvent("tool_use", { part })) return
+            const [tool, color] = TOOL[part.tool] ?? [part.tool, UI.Style.TEXT_INFO_BOLD]
+            const title =
+              part.state.title ||
+              (Object.keys(part.state.input).length > 0 ? JSON.stringify(part.state.input) : "Unknown")
+            printEvent(color, tool, title)
+            if (part.tool === "bash" && part.state.output?.trim()) {
+              UI.println()
+              UI.println(part.state.output)
+            }
+          }
+
+          if (part.type === "step-start") {
+            if (outputJsonEvent("step_start", { part })) return
+          }
+
+          if (part.type === "step-finish") {
+            if (outputJsonEvent("step_finish", { part })) return
+          }
+
+          if (part.type === "text" && part.time?.end) {
+            if (outputJsonEvent("text", { part })) return
+            const isPiped = !process.stdout.isTTY
+            if (!isPiped) UI.println()
+            process.stdout.write((isPiped ? part.text : UI.markdown(part.text)) + EOL)
+            if (!isPiped) UI.println()
+          }
+        }
+
+        if (event.type === "session.error") {
+          const props = event.properties
+          if (props.sessionID !== sessionID || !props.error) return
+          let err = String(props.error.name)
+          if ("data" in props.error && props.error.data && "message" in props.error.data) {
+            err = String(props.error.data.message)
+          }
+          errorMsg = errorMsg ? errorMsg + EOL + err : err
+          if (outputJsonEvent("error", { error: props.error })) return
+          UI.error(err)
+        }
+
+        if (event.type === "session.idle" && event.properties.sessionID === sessionID) {
+          resolveIdle?.()
+        }
+
+        if (event.type === "permission.updated") {
+          const permission = event.properties
+          if (permission.sessionID !== sessionID) return
+          // Auto-allow in non-interactive (non-TTY) mode
+          if (!process.stdout.isTTY) {
+            Permission.respond({
+              sessionID,
+              permissionID: permission.id,
+              response: "once",
+            })
+            return
+          }
+          select({
+            message: `Permission required to run: ${permission.title}`,
+            options: [
+              { value: "once", label: "Allow once" },
+              { value: "always", label: "Always allow" },
+              { value: "reject", label: "Reject" },
+            ],
+            initialValue: "once",
+          }).catch(() => "reject").then((result) => {
+            const response = (result.toString().includes("cancel") ? "reject" : result) as "once" | "always" | "reject"
+            Permission.respond({
+              sessionID,
+              permissionID: permission.id,
+              response,
+            })
+          })
+        }
+      })
+
+      // Validate agent if specified
+      const resolvedAgent = await (async () => {
+        if (!args.agent) return undefined
+        const agent = await Agent.get(args.agent)
+        if (!agent) {
+          UI.println(
+            UI.Style.TEXT_WARNING_BOLD + "!",
+            UI.Style.TEXT_NORMAL,
+            `agent "${args.agent}" not found. Falling back to default agent`,
+          )
+          return undefined
+        }
+        if (agent.mode === "subagent") {
+          UI.println(
+            UI.Style.TEXT_WARNING_BOLD + "!",
+            UI.Style.TEXT_NORMAL,
+            `agent "${args.agent}" is a subagent, not a primary agent. Falling back to default agent`,
+          )
+          return undefined
+        }
+        return args.agent
+      })()
+
+      // Send prompt directly (no HTTP)
+      runLog.info("sending prompt directly", { sessionID })
+      if (args.command) {
+        await SessionPrompt.command({
+          sessionID,
+          command: args.command,
+          arguments: message,
+          agent: resolvedAgent,
+          model: args.model,
+        })
+      } else {
+        const modelParam = args.model ? Provider.parseModel(args.model) : undefined
+        SessionPrompt.prompt({
+          sessionID,
+          agent: resolvedAgent,
+          model: modelParam,
+          parts: [...fileParts, { type: "text" as const, text: message }],
+        })
+      }
+
+      await idlePromise
+      unsub()
+      if (errorMsg) process.exit(1)
     })
   },
 })
