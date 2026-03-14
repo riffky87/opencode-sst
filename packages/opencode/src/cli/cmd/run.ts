@@ -11,6 +11,7 @@ import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2"
 import { Server } from "../../server/server"
 import { Provider } from "../../provider/provider"
 import { Agent } from "../../agent/agent"
+import { Session } from "../../session"
 import { Log } from "../../util/log"
 
 const runLog = Log.create({ service: "run-cmd" })
@@ -343,14 +344,11 @@ export const RunCommand = cmd({
               : args.title
             : undefined
 
-        runLog.info("creating session", { title })
+        runLog.info("creating session directly", { title })
         try {
-          const result = await sdk.session.create(title ? { title } : {})
-          runLog.info("session.create result", { data: result.data, error: result.error })
-          if (result.error) {
-            UI.error(`Session creation failed: ${JSON.stringify(result.error)}`)
-          }
-          return result.data?.id
+          const session = await Session.create(title ? { title } : {})
+          runLog.info("session created", { id: session.id })
+          return session.id
         } catch (e) {
           runLog.error("session.create threw", { error: String(e), stack: (e as Error)?.stack })
           UI.error(`Session creation exception: ${e}`)
