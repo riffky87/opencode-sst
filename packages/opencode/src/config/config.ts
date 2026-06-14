@@ -667,6 +667,10 @@ export namespace Config {
         .optional()
         .describe("When set, ONLY these providers will be enabled. All other providers will be ignored"),
       model: z.string().describe("Model to use in the format of provider/model, eg anthropic/claude-2").optional(),
+      effort: z
+        .enum(["low", "medium", "high", "max"])
+        .optional()
+        .describe("Effort level controlling token spend vs quality. Supported by Anthropic and some other providers."),
       small_model: z
         .string()
         .describe("Small model to use for tasks like title generation in the format of provider/model")

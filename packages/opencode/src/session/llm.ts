@@ -94,6 +94,9 @@ export namespace LLM {
           {},
           mergeDeep(ProviderTransform.options(input.model, input.sessionID, provider.options)),
           input.small ? mergeDeep(ProviderTransform.smallOptions(input.model)) : mergeDeep({}),
+          cfg.effort && input.model.api.npm === "@ai-sdk/anthropic"
+            ? mergeDeep({ effort: cfg.effort })
+            : mergeDeep({}),
           mergeDeep(input.model.options),
           mergeDeep(input.agent.options),
         ),
